@@ -1,23 +1,44 @@
 ---
-- name: debug variable group_names
-  debug: var=group_names
+- name: set fact my_group_names
+  set_fact:
+    my_group_names: "{{ group_names|default([]) + ['all'] }}"
+
+- name: debug variable my_group_names
+  debug: var=my_group_names
   when: debug_enabled_default | bool
 
 - name: debug variable users
   debug: var=users
   when: debug_enabled_default | bool
 
-- name: Add group | create primary group before adding user to group
-  group:
-    name: "{{ item.0.primarygroup }}"
-    gid: "{{ item.0.primarygid | default(omit) }}"
-    state: present
-  when: item.0.primarygroup is defined and item.1 in group_names
+- name: Check if user exists
+  getent:
+    database: passwd
+    key: "{{ item.0.username }}"
+    fail_key: false
   with_subelements:
     - "{{ users }}"
     - servers
+  when: item.0.user_state == "lock"
+  register: check_users
   loop_control:
-    label: "primarygroup: {{ item.0.primarygroup if item.0.primarygroup is defined else '' }}, primarygid: {{ item.0.primarygid if item.0.primarygid is defined else 'default' }}" # noqa 204
+    label: "username: {{ item.0.username }}"
+
+- name: set_fact - mark locked users as none existant and skip them while creating
+  set_fact:
+    skip_users: "{{ (skip_users | default([])) + [item.item.0.username] }}"
+  with_items:
+    - "{{ check_users.results }}"
+  when: |
+    item.ansible_facts.getent_passwd[item.item.0.username] is defined
+    and
+    item.ansible_facts.getent_passwd[item.item.0.username] | default([],true) | length == 0
+  loop_control:
+    label: "username: {{ item.item.0.username }}"
+
+- name: debug show check_users
+  debug: var=skip_users
+  when: debug_enabled_default | bool
 
 # Get unique list of groups to create on the server (var is different on each server)
 # Still keeps formatting of comma separated list and converts to list (even if whitespace)
@@ -27,13 +48,25 @@
   with_subelements:
     - "{{ users }}"
     - servers
-  when: item.0.groups is defined and item.1 in group_names
+  when: item.0.groups is defined and item.1 in my_group_names and not item.0.username in skip_users
   loop_control:
     label: "username: {{ item.0.username }}, groups_as_list: {{ item.0.groups if item.0.groups is defined else '' }}"
 
 - name: debug show groups_as_list
   debug: var=groups_as_list
   when: debug_enabled_default | bool
+
+- name: Add group | create primary group before adding user to group
+  group:
+    name: "{{ item.0.primarygroup }}"
+    gid: "{{ item.0.primarygid | default(omit) }}"
+    state: present
+  when: item.0.primarygroup is defined and item.1 in my_group_names and not item.0.username in skip_users
+  with_subelements:
+    - "{{ users }}"
+    - servers
+  loop_control:
+    label: "username: {{ item.0.username }}, primarygroup: {{ item.0.primarygroup if item.0.primarygroup is defined else '' }}, primarygid: {{ item.0.primarygid if item.0.primarygid is defined else 'default' }}" # noqa 204
 
 - name: Add group | create groups before adding user to group
   group:
@@ -44,7 +77,7 @@
   loop_control:
     label: "groups: {{ item }}"
 
-- name: Add users | create users, shell, home dirs
+- name: Setup users | create users, shell, home dirs
   user:
     name: "{{ item.0.username }}"
     uid: "{{ item.0.uid | default(omit, True) }}"
@@ -59,13 +92,13 @@
 #    expires: -1 #unlock account if locked ###Doesn't work like chage..
 #    command: chage -E -1 {{ item.0.username }} #unlock password authentication
 #  register: user_results
-  when: (item.0.user_state == 'present' or item.0.user_state == 'lock') and item.1 in group_names
-#works but not multiple servers #and 'centos6' in "{{ group_names }}"
+  when: (item.0.user_state == 'present' or item.0.user_state == 'lock') and item.1 in my_group_names and not item.0.username in skip_users
+#works but not multiple servers #and 'centos6' in "{{ my_group_names }}"
   with_subelements:
     - "{{ users }}"
     - servers
   loop_control:
-    label: "username: {{ item.0.username }}, user_state: {{ item.0.user_state }}, password: {{ 'True' if item.0.password is defined else 'False' }}, update_password: {{ item.0.update_password if item.0.update_password is defined else default_update_password }}, primarygroup: {{ item.0.primarygroup if item.0.primarygroup is defined else ''}}, groups: {{ item.0.groups if item.0.groups is defined else ''}}, servers: {{ item.1 if item.1 is defined else '' }}, group_names: {{ group_names }}" # noqa 204
+    label: "username: {{ item.0.username }}, user_state: {{ item.0.user_state }}, password: {{ 'True' if item.0.password is defined else 'False' }}, update_password: {{ item.0.update_password if item.0.update_password is defined else default_update_password }}, primarygroup: {{ item.0.primarygroup if item.0.primarygroup is defined else ''}}, groups: {{ item.0.groups if item.0.groups is defined else ''}}, servers: {{ item.1 if item.1 is defined else '' }}, my_group_names: {{ my_group_names }}" # noqa 204
 
 - name: Add users | Unlock password login (set expiry to -1)
   user:
@@ -73,7 +106,7 @@
     expires: -1 #unlock account if locked
 #    command: chage -E -1 {{ item.0.username }} #unlock password authentication
 #  register: user_results
-  when: item.0.user_state == 'present' and item.1 in group_names
+  when: item.0.user_state == 'present' and item.1 in my_group_names and not item.0.username in skip_users
   with_subelements:
     - "{{ users }}"
     - servers
@@ -82,52 +115,6 @@
 
 #- debug: var=user_results
 
-#DONE: Change to user module once -1 bug fixed.
-#DONE: Follow issue https://github.com/ansible/ansible/issues/20096
-# - name: Add users | Unlock password login (set expiry to -1)
-#   chage:
-#     user: "{{ item.0.username }}"
-#     sp_expire: -1
-# #  command: chage -E -1 {{ item.username }} #unlock password authentication
-#   when: item.0.user_state == 'present' and item.1 in group_names
-#   with_subelements:
-#     - "{{ users }}"
-#     - servers
-#   loop_control:
-#     label: "username: {{item.0.username}}, user_state: {{ item.0.user_state }}"
-
-##DONE user module doesn't work properly? expires=0 doesn't change anything. expires=1+ always updates??
-##Use chage module instead
-# - name: Lock users | Lock password & ssh key authentication
-#   chage:
-#     user: "{{ item.0.username }}"
-#     sp_expire: 0
-# #  command: chage -E 0 {{ item.0.username }} #Alternative lock password & ssh key authentication
-#   when: item.0.user_state == 'lock' and item.1 in group_names
-#   with_subelements:
-#     - "{{ users }}"
-#     - servers
-#   loop_control:
-#     label: "username: {{item.0.username}}, user_state: {{ item.0.user_state }}"
-
-- name: Lock users | Lock password & ssh key authentication
-  user:
-    name: "{{ item.0.username }}"
-    expires: 0 #lock account if not locked
-#  command: chage -E 0 {{ item.0.username }} #Alternative lock password & ssh key authentication
-#  register: user_results
-  when: item.0.user_state == 'lock' and item.1 in group_names
-  with_subelements:
-    - "{{ users }}"
-    - servers
-  loop_control:
-    label: "username: {{ item.0.username }}, user_state: {{ item.0.user_state }}"
-
-#Not needed, sp_expire -1 locks password authentication as well.
-#- name: Lock users | Lock password login
-#  command: passwd -l {{ item.username }} #lock password authentication
-#  when: item.user_state == 'lock'
-#  with_items: "{{ users }}"
 
 - name: SSH Keys | Add authorized key for ssh key authentication
   authorized_key:
@@ -135,7 +122,7 @@
     key: "{{ item.0.ssh_key }}"
     exclusive: "{{ item.0.exclusive_ssh_key if item.0.exclusive_ssh_key is defined else 'no' }}"
     state: present
-  when: item.0.ssh_key is defined and item.1 in group_names
+  when: item.0.ssh_key is defined and item.1 in my_group_names and not item.0.username in skip_users
   with_subelements:
     - "{{ users }}"
     - servers
@@ -153,7 +140,7 @@
   environment:
     PATH: /usr/sbin:/usr/local/sbin:/sbin
   # TODO: Fix literal compare
-  when: item.0.use_sudo|d(false)|bool == true and item.1 in group_names # noqa 601
+  when: item.0.use_sudo|d(false)|bool == true and item.1 in my_group_names and not item.0.username in skip_users # noqa 601
   with_subelements:
     - "{{ users }}"
     - servers
@@ -171,9 +158,56 @@
   environment:
     PATH: /usr/sbin:/usr/local/sbin:/sbin
   # TODO: Fix literal compare
-  when: item.0.use_sudo|d(false)|bool == false and item.1 in group_names # noqa 601
+  when: item.0.use_sudo|d(false)|bool == false and item.1 in my_group_names and not item.0.username in skip_users # noqa 601
   with_subelements:
     - "{{ users }}"
     - servers
   loop_control:
     label: "username: {{ item.0.username }}, use_sudo: {{ item.0.use_sudo|d(false) }}"
+
+#DONE: Change to user module once -1 bug fixed.
+#DONE: Follow issue https://github.com/ansible/ansible/issues/20096
+# - name: Add users | Unlock password login (set expiry to -1)
+#   chage:
+#     user: "{{ item.0.username }}"
+#     sp_expire: -1
+# #  command: chage -E -1 {{ item.username }} #unlock password authentication
+#   when: item.0.user_state == 'present' and item.1 in my_group_names and not item.0.username in skip_users
+#   with_subelements:
+#     - "{{ users }}"
+#     - servers
+#   loop_control:
+#     label: "username: {{item.0.username}}, user_state: {{ item.0.user_state }}"
+
+##DONE user module doesn't work properly? expires=0 doesn't change anything. expires=1+ always updates??
+##Use chage module instead
+# - name: Lock users | Lock password & ssh key authentication
+#   chage:
+#     user: "{{ item.0.username }}"
+#     sp_expire: 0
+# #  command: chage -E 0 {{ item.0.username }} #Alternative lock password & ssh key authentication
+#   when: item.0.user_state == 'lock' and item.1 in my_group_names and not item.0.username in skip_users
+#   with_subelements:
+#     - "{{ users }}"
+#     - servers
+#   loop_control:
+#     label: "username: {{item.0.username}}, user_state: {{ item.0.user_state }}"
+
+- name: Lock users | Lock password & ssh key authentication
+  user:
+    name: "{{ item.0.username }}"
+    expires: 0 #lock account if not locked
+  #  command: chage -E 0 {{ item.0.username }} #Alternative lock password & ssh key authentication
+  #  register: user_results
+  when: item.0.user_state == 'lock' and item.1 in my_group_names and not item.0.username in skip_users
+  with_subelements:
+    - "{{ users }}"
+    - servers
+  loop_control:
+    label: "username: {{ item.0.username }}, user_state: {{ item.0.user_state }}"
+
+#Not needed, sp_expire -1 locks password authentication as well.
+#- name: Lock users | Lock password login
+#  command: passwd -l {{ item.username }} #lock password authentication
+#  when: item.user_state == 'lock' and not item.0.username in skip_users
+#  with_items: "{{ users }}"
