@@ -97,8 +97,13 @@ File Location: vars/secret
   NOTE: 1 key can go on single line, but if multiple keys, use formatting below from first example.
 * **exclusive_ssh_key**: yes|no (optional, default: no)  
   **WARNING**: exclusive_ssh_key: yes - will remove any ssh keys not defined here! no - will add any key specified.
+* **generate_ssh_key**: Whether to generate a SSH key for the user in question. (optional, default is 'no')  
+  NOTE: This will not overwrite an existing SSH key
+* **ssh_key_bits**: Optionally specify number of bits in SSH key to create. (optional, default set by ssh-keygen)
+* **ssh_key_passphrase**: Set a passphrase for the SSH key. If no passphrase is provided, the SSH key will default to having no passphrase.
 * **use_sudo**: yes|no (optional, default no)
 * **use_sudo_nopass**: yes|no (optional, default no). yes = passwordless sudo.
+* **system**: yes|no (optional, default no). yes = create system account (uid < 1000). Does not work on existing users.
 * **servers**: sub-element list of servers where changes are made. **(required)**  
   These are the Ansible groups from your Ansible inventory file. In below examples, `webserver` would be the 3 servers in the `webserver` Ansible inventory `webserver1`, `webserver2`, and `webserver3`.  
 
@@ -187,6 +192,8 @@ users:
     primarygroup: testgroup105primary
     primarygid: 2222
     ssh_key: ssh-rsa AAAB.... test107@server
+    generate_ssh_key: yes
+    ssh_key_bits: 4096
     use_sudo: no
     user_state: lock
     servers:
